@@ -1,0 +1,28 @@
+services:
+  app:
+    build: .
+    image: news-title-virality:latest
+    container_name: news-title-virality
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONPATH=/app
+      - NLTK_DATA=/usr/local/share/nltk_data
+    command: bash
+
+  jupyter:
+    build: .
+    image: news-title-virality:latest
+    container_name: news-title-virality-jupyter
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONPATH=/app
+      - NLTK_DATA=/usr/local/share/nltk_data
+    ports:
+      - "8888:8888"
+    command: >
+      jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+      --NotebookApp.token='' --NotebookApp.password=''
