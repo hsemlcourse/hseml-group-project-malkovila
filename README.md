@@ -19,10 +19,10 @@
 
 По признакам, вычисляемым **до публикации** статьи (текст заголовка, канал публикации, день недели), предсказать, попадёт ли она в верхнюю половину распределения `shares` на Mashable. Тема и формулировка выбраны так, чтобы модель реально была применима как ассистент редактора при A/B-тестах заголовков.
 
-- **Задача:** бинарная классификация (`is_popular = shares >= median(shares)`).
+- **Задача:** бинарная классификация (`is_popular`: порог — медиана `shares` **только в train**, без утечки из val/test; фиксируется в `data/processed/split_meta.json`).
 - **Датасет:** [UCI Online News Popularity](https://archive.ics.uci.edu/dataset/332/online+news+popularity) (39 644 × 61).
 - **Главная метрика:** ROC-AUC. Сопровождающие: F1 (positive class), PR-AUC, Precision@top-10%.
-- **Чекпоинт:** CP1 — подготовка данных, самостоятельный парсинг заголовков, baseline LogReg, 2 эксперимента-задела. Подробности в [`report/report.md`](report/report.md).
+- **Чекпоинт:** CP2 — расширенные эксперименты (Optuna + RandomizedSearch), стекинг, MLflow, time-split и дрифт, размерность PCA/UMAP; отчёт см. [`report/report.md`](report/report.md).
 
 ## Структура репозитория
 
@@ -30,7 +30,7 @@
 .
 ├── data/
 │   ├── raw/                   # Исходный CSV UCI + кэш заголовков (titles.jsonl)
-│   └── processed/             # features.parquet, train/val/test.parquet
+│   └── processed/             # features.parquet, split_meta.json, train/val/test*.parquet
 ├── models/                    # Сериализованные модели (joblib)
 ├── notebooks/
 │   ├── 01_eda.ipynb           # EDA, визуализации, выбор порога
@@ -49,16 +49,26 @@
 │   │   └── parse_titles.py    # Slug → HTTP → Wayback, CLI с кэшем
 │   ├── features/
 │   │   ├── title_features.py  # 25 handcrafted-фич по тексту заголовка
-│   │   └── build_dataset.py   # Очистка → FE → stratified split 70/15/15
+│   │   ├── build_dataset.py   # Очистка → FE → split → порог по train
+│   │   ├── build_dataset_full.py  # + TF-IDF char/word + SVD, readability
+│   │   ├── time_split.py      # сплит по timedelta
+│   │   └── drift_report.py    # KS train vs test
 │   ├── modeling/
 │   │   ├── metrics.py         # ROC-AUC, F1, PR-AUC, Precision@k
 │   │   ├── baseline.py        # LogReg на 5 CSV title-фичах
-│   │   └── experiments.py     # Exp1 (LogReg + FE) и Exp2 (Tree depth=6)
+│   │   ├── experiments.py     # Exp1 (LogReg + FE) и Exp2 (Tree depth=6)
+│   │   ├── tuners.py          # Optuna / RandomizedSearch
+│   │   ├── experiments_cp2.py # CP2: L1/L2, KNN, RF, XGB/LGB/Cat, калибровка, стекинг
+│   │   ├── final_model.py     # финальный LGBM + permutation importance
+│   │   ├── dim_reduction.py   # PCA-кривая, UMAP
+│   │   └── time_split_eval.py # метрики на time-parquet
 │   └── utils/
 │       ├── seed.py            # SEED=42 для random/numpy/PYTHONHASHSEED
-│       └── logging_setup.py   # Единообразный логгер
-├── tests/                     # pytest: parser, features, metrics, split
-├── .github/workflows/ci.yml   # CI: ruff check src/ --line-length 120
+│       ├── logging_setup.py   # Единообразный логгер
+│       └── mlflow_setup.py    # MLflow `file:./mlruns`
+├── mlruns/                    # локальный MLflow (не коммитится)
+├── tests/                     # pytest: parser, features, metrics, split, tuners
+├── .github/workflows/ci.yml   # CI: ruff + pytest + NLTK
 ├── Dockerfile / docker-compose.yml
 ├── Makefile                   # make setup / data / parse / features / baseline / test / lint
 ├── pyproject.toml             # ruff + pytest config
@@ -75,7 +85,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python -m nltk.downloader punkt averaged_perceptron_tagger stopwords vader_lexicon
+pre-commit install   # опционально: хуки из .pre-commit-config.yaml
 ```
+
+**Windows и длинные пути.** Если `pip install` падает с `OSError: No such file or directory` на файле внутри `venv\share\jupyter\labextensions\...`, это лимит длины пути (часто на путях с кириллицей и вложенными `node_modules`). Варианты: включить [длинные пути в Windows](https://pip.pypa.io/warnings/enable-long-paths); создать venv по **короткому** пути, например `python -m venv C:\venvs\newsml` и активировать его, затем `pip install -r requirements.txt` из каталога проекта. В `requirements.txt` вместо метапакета `jupyter` указан классический **`notebook==6.5.7`** — меньше глубоких зависимостей JupyterLab.
 
 ### Пайплайн CP1 одной командой
 
@@ -87,8 +100,26 @@ make features   # очистка + FE + split, запись в data/processed/
 make baseline   # LogReg на 5 CSV-фичах + сохранение модели и метрик
 make notebooks  # прогнать все 4 .ipynb через papermill (нужны данные)
 make test       # pytest (20 тестов)
-make lint       # ruff check src/ — CI использует эту же команду
+make lint       # ruff check src/ — CI использует лint частично + pytest в CI
 ```
+
+### Пайплайн CP2 (после `make data` и `make parse`)
+
+Длинная цепочка: расширенные признаки, time-split, дрифт, эксперименты с бустингами и стекингом, размерность, финальная модель.
+
+```bash
+make features-cp2     # --full: TF-IDF+SVD, textstat readability (долго по CPU)
+make time-split       # train_time / val_time / test_time.parquet
+make drift            # report/tables/feature_drift.csv + images/05_*.png
+make experiments-cp2  # mlruns/ + report/tables/experiments_cp2.csv (долго)
+make dim-reduction    # PCA/UMAP графики в report/images/
+make final-model      # models/final_lgbm_cp2.joblib + permutation importance
+make time-metrics     # time_split_metrics.csv (нужны *_time.parquet)
+```
+
+Или обёртка (ожидает готовый `data/raw/*.csv`): `make run-all-cp2` — см. Makefile; при нехватке данных шаги упадут с понятной ошибкой.
+
+Переменная **`CP2_FAST=1`** уменьшает число итераций Optuna/RS (используется в CI для `pytest`).
 
 ### Docker
 
@@ -113,7 +144,8 @@ python -m src.data.parse_titles --input data/raw/online_news_popularity.csv \
 - `data/raw/online_news_popularity.csv` — исходный UCI dataset (39 644 × 61, текущая версия UCI). Не коммитится, скачивается через `make data`.
 - `data/raw/titles.jsonl` — JSONL-кэш заголовков, построчно (по одному URL). Не коммитится.
 - `data/processed/features.parquet` — полный датасет с 25 инженерными фичами и бинарными таргетами.
-- `data/processed/{train,val,test}.parquet` — стратифицированный сплит 70/15/15 с `random_state=42`.
+- `data/processed/{train,val,test}.parquet` — стратифицированный сплит 70/15/15 с `random_state=42`, порог `is_popular`/`is_viral` от **train**-медианы/квантиля (`split_meta.json`).
+- После `make features-cp2`: `train_full.parquet` и зеркальные `train.parquet` с сотнями признаков (базовые + TF-IDF SVD + readability).
 
 ## Результаты
 
@@ -127,6 +159,8 @@ CP1 — ключевая таблица (validation, после `make run-all`):
 
 Сводные данные: [`report/tables/cp1_validation_summary.csv`](report/tables/cp1_validation_summary.csv), полные сплиты train/val/test — [`report/tables/baseline_metrics.csv`](report/tables/baseline_metrics.csv) и [`report/tables/experiments_cp1.csv`](report/tables/experiments_cp1.csv). Графики — [`report/images/`](report/images/).
 
+**CP2** (после `make experiments-cp2` и `make final-model`): сводная таблица — [`report/tables/experiments_cp2.csv`](report/tables/experiments_cp2.csv); финальные метрики и permutation importance — [`report/tables/final_metrics.csv`](report/tables/final_metrics.csv), [`report/tables/permutation_importance.csv`](report/tables/permutation_importance.csv). Трекинг экспериментов: локальный MLflow в каталоге `mlruns/` (или задайте `MLFLOW_TRACKING_URI`).
+
 ## Отчёт
 
-Финальный отчёт по CP1 (§1–§5 заполнены полностью, §6–§8 зарезервированы под CP2/CP3): [`report/report.md`](report/report.md).
+Финальный отчёт с разделами CP1+CP2: [`report/report.md`](report/report.md).

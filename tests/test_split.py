@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.config import BINARY_TARGET_COL
+from src.config import BINARY_TARGET_COL, TARGET_COL
 from src.features.build_dataset import build_dataset
 
 
@@ -47,6 +48,7 @@ def test_stratified_split_keeps_class_balance(tmp_path: Path, synthetic_csv: Pat
         train_path=out / "train.parquet",
         val_path=out / "val.parquet",
         test_path=out / "test.parquet",
+        split_meta_path=out / "split_meta.json",
     )
     train, val, test = splits["train"], splits["val"], splits["test"]
 
@@ -54,9 +56,18 @@ def test_stratified_split_keeps_class_balance(tmp_path: Path, synthetic_csv: Pat
     assert abs(len(train) / len(splits["full"]) - 0.70) < 0.03
     assert abs(len(val) / len(splits["full"]) - 0.15) < 0.03
 
-    balances = [df[BINARY_TARGET_COL].mean() for df in (train, val, test)]
-    for b in balances:
-        assert 0.4 < b < 0.6
+    meta_path = out / "split_meta.json"
+    assert meta_path.is_file()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    pop_thr = meta["popularity_threshold"]
+    train_median = float(train[TARGET_COL].median())
+    assert abs(pop_thr - train_median) < 1e-6
+
+    for name, part in (("train", train), ("val", val), ("test", test)):
+        expected = (part[TARGET_COL] >= pop_thr).astype(int)
+        pd.testing.assert_series_equal(part[BINARY_TARGET_COL], expected, check_names=False)
+        mean_pos = part[BINARY_TARGET_COL].mean()
+        assert 0.20 < mean_pos < 0.80, f"{name} balance {mean_pos} out of range"
 
 
 def test_no_url_leakage_between_splits(tmp_path: Path, synthetic_csv: Path) -> None:
@@ -68,6 +79,7 @@ def test_no_url_leakage_between_splits(tmp_path: Path, synthetic_csv: Path) -> N
         train_path=out / "train.parquet",
         val_path=out / "val.parquet",
         test_path=out / "test.parquet",
+        split_meta_path=out / "split_meta.json",
     )
     urls_train = set(splits["train"]["url"])
     urls_val = set(splits["val"]["url"])
@@ -91,6 +103,7 @@ def test_split_is_deterministic(tmp_path: Path, synthetic_csv: Path) -> None:
             train_path=out / "train.parquet",
             val_path=out / "val.parquet",
             test_path=out / "test.parquet",
+            split_meta_path=out / "split_meta.json",
         )["train"]
 
     t1 = _run(out1).reset_index(drop=True)

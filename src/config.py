@@ -20,6 +20,10 @@ FEATURES_PARQUET_PATH: Path = PROCESSED_DIR / "features.parquet"
 TRAIN_PARQUET_PATH: Path = PROCESSED_DIR / "train.parquet"
 VAL_PARQUET_PATH: Path = PROCESSED_DIR / "val.parquet"
 TEST_PARQUET_PATH: Path = PROCESSED_DIR / "test.parquet"
+SPLIT_META_PATH: Path = PROCESSED_DIR / "split_meta.json"
+TRAIN_FULL_PARQUET_PATH: Path = PROCESSED_DIR / "train_full.parquet"
+VAL_FULL_PARQUET_PATH: Path = PROCESSED_DIR / "val_full.parquet"
+TEST_FULL_PARQUET_PATH: Path = PROCESSED_DIR / "test_full.parquet"
 
 TRAIN_SIZE: float = 0.70
 VAL_SIZE: float = 0.15
@@ -30,6 +34,19 @@ BINARY_TARGET_COL: str = "is_popular"
 VIRAL_TARGET_COL: str = "is_viral"
 
 VIRAL_TOP_QUANTILE: float = 0.80
+
+# Не использовать как признаки при обучении (утечка времени / идентификаторы).
+MODELING_EXCLUDE_COLS: frozenset[str] = frozenset(
+    {
+        "url",
+        "title",
+        "title_source",
+        "timedelta",
+        TARGET_COL,
+        BINARY_TARGET_COL,
+        VIRAL_TARGET_COL,
+    }
+)
 
 CSV_TITLE_FEATURES: tuple[str, ...] = (
     "n_tokens_title",

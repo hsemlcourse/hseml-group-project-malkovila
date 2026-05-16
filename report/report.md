@@ -1,4 +1,4 @@
-# Отчёт по проекту — CP1
+# Отчёт по проекту — CP1 / CP2
 
 **Тема.** Предсказание вирусности новостного заголовка по его лингвистическим и структурным признакам.
 
@@ -115,15 +115,23 @@
 
 ![Mutual Information признаков](images/03_feature_mi.png)
 
-### 3.5. Сплит данных и защита от утечек
+### 3.5. Сплит данных и защита от утечек (CP2)
 
 Реализовано в [`src/features/build_dataset.py`](../src/features/build_dataset.py):
 
-- **Stratified hold-out 70/15/15** по бинарному таргету `is_popular`, `random_state=42`. Фактические размеры сплитов: **train = 27 750, val = 5 946, test = 5 947**; доля positive-класса во всех трёх сплитах — **0.534** (проверяется тестом `tests/test_split.py`).
-- **Отсутствие утечек по URL.** Один и тот же URL не попадает в разные сплиты — проверяется тестом [`tests/test_split.py`](../tests/test_split.py).
-- **Порог медианы вычисляется только на данных до сплита глобально** (и равен медиане всей очищенной выборки); для продакшена в CP2 будет переключено на медиану только train-сплита, чтобы полностью исключить утечку. В CP1 использование глобальной медианы не даёт утечки для классификации, потому что `is_popular` — монотонная функция от `shares`, и train/val/test получают статистически идентичные пороги благодаря стратификации.
-- **Временная ablation.** `timedelta` (дни от публикации до сбора датасета) сохранена в parquet — на CP2 добавим временной сплит как проверку на concept drift.
-- **Детерминизм.** Все вызовы используют `SEED=42`; проверяется тестом `test_split_is_deterministic`.
+- **Стратифицированный hold-out 70/15/15.** Перед расчётом таргета сплит выполняется по прокси-метке `shares >= median(shares)` по всей выборке (для сохранения баланса по уровню популярности), `random_state=42`. Итоговые метки `is_popular` и `is_viral` задаются **одним порогом популярности** (медиана `shares` **только в train**) и квантилем виральности (аналогично, только по train). Численные пороги и список признаков сохраняются в [`data/processed/split_meta.json`](../data/processed/split_meta.json) при сборке пайплайна.
+- **Отсутствие утечек по URL.** Один и тот же URL не попадает в разные сплиты — [`tests/test_split.py`](../tests/test_split.py).
+- **Колонка `timedelta`.** Сохраняется в parquet для анализа и **не входит** в модель (см. `MODELING_EXCLUDE_COLS` в [`src/config.py`](../src/config.py)), чтобы не использовать информацию, не относящуюся к post-hoc характеристикам снимка данных.
+- **Детерминизм.** `SEED=42` — тест `test_split_is_deterministic`.
+
+### 3.7. Расширенные признаки (опция `--full`)
+
+Команда `python -m src.features.build_dataset --full` (см. [`build_dataset_full.py`](../src/features/build_dataset_full.py)): **textstat**-метрики читабельности по `title`; **TF-IDF** (char wb 3–5-граммы + словесные 1–2-граммы) с **`TruncatedSVD`**, обученным **только на train**-корпусе заголовков. Артефакты векторизатора — `models/text_tfidf_svd_artifacts.joblib`.
+
+### 3.8. Временной сплит и дрифт
+
+- **Time-split.** [`src/features/time_split.py`](../src/features/time_split.py): сортировка по `timedelta`, те же пропорции 70/15/15; таргеты с порогами, посчитанными на train-срезе — `data/processed/train_time.parquet` и т.д. Сравнение с random-split — в [`report/tables/time_split_metrics.csv`](tables/time_split_metrics.csv) (после `make time-metrics`).
+- **Дрифт.** [`src/features/drift_report.py`](../src/features/drift_report.py): KS train vs test, [`report/tables/feature_drift.csv`](tables/feature_drift.csv), график `images/05_feature_drift_top.png`.
 
 ### 3.6. Выбор и обоснование метрики
 
@@ -177,20 +185,32 @@
 
 Полный dump по всем трём сплитам (train/val/test) — в [`report/tables/experiments_cp1.csv`](tables/experiments_cp1.csv) и сводка — в [`report/tables/cp1_validation_summary.csv`](tables/cp1_validation_summary.csv).
 
+### 5.1. Эксперименты CP2
+
+Полный цикл описан в коде [`src/modeling/experiments_cp2.py`](../src/modeling/experiments_cp2.py), подбор гиперпараметров — [`src/modeling/tuners.py`](../src/modeling/tuners.py): **LogReg L2/L1** + `StandardScaler` (`RandomizedSearchCV`), **KNN**, **RandomForest**, **XGBoost / LightGBM / CatBoost** (Optuna, 5-fold CV на train, при сжатии через `CP2_FAST` — быстрый режим для CI). Дополнительно: **калибровка isotonic** для LightGBM, **StackingClassifier** (RF + XGB + LGBM, мета — LogReg). Трекинг: **MLflow** (`file:./mlruns`), агрегированная таблица — **[`report/tables/experiments_cp2.csv`](tables/experiments_cp2.csv)** (заполните после `make experiments-cp2` на полном датасете).
+
+Формат каждой строки соответствует требованию курса: **гипотеза** (`hypothesis` в CSV), **как проверялось** (модель, подбор, сплиты), **результат** (метрики `train_*`, `val_*`, `test_*`).
+
+### 5.2. Снижение размерности
+
+Реализовано в [`src/modeling/dim_reduction.py`](../src/modeling/dim_reduction.py): кривая **ROC-AUC (val)** для `LogReg` на **PCA** с разным `n_components` (`images/06_pca_auc_curve.png`); визуализация **UMAP-2D** на подвыборке train (`images/06_umap_scatter.png`). Дополнительно TF-IDF+SVD в §3.7 служит сжатием текстового блока признаков.
+
 ---
 
-## 6–8. Финальная модель, деплой, заключение
+## 6. Финальная модель и интерпретируемость (CP2)
 
-Эти разделы заполняются на CP2 (эксперименты, подбор гиперпараметров, выбор финальной модели) и CP3 (интерпретируемость, деплой, видео). В рамках CP1 они оставлены в шаблонном виде, чтобы структура отчёта оставалась цельной.
+Скрипт [`src/modeling/final_model.py`](../src/modeling/final_model.py): повторный подбор **LightGBM** (Optuna) на train, оценка на val/test, сохранение бандла в **`models/final_lgbm_cp2.joblib`**, метрики — **[`report/tables/final_metrics.csv`](tables/final_metrics.csv)**, **permutation importance** на val — [`report/tables/permutation_importance.csv`](tables/permutation_importance.csv) и `images/07_permutation_importance.png`. Итоговый конфиг для отчёта — [`report/tables/final_model_summary.json`](tables/final_model_summary.json).
 
-### 6. Финальная модель и интерпретируемость — CP2
+Сравнение с CP1 baseline/exp1 фиксируйте по столбцу `val_roc_auc` в `experiments_cp2.csv` и по `final_metrics.csv`.
 
-Запланировано: сравнение ≥ 4–5 моделей (LogReg, KNN, RandomForest, XGBoost, LightGBM), перебор гиперпараметров через `RandomizedSearchCV`, эксперименты с уменьшением размерности (PCA / UMAP, визуализация 2D), выбор финальной модели по ROC-AUC на валидации с подтверждением на test. Интерпретируемость — через permutation importance и SHAP.
+---
 
-### 7. Деплой — CP3
+## 7. Деплой — CP3
 
-Запланировано: FastAPI-эндпоинт `/predict` (принимает JSON с заголовком и каналом, возвращает вероятность виральности), Streamlit-демо со слайдером порога, Docker-образ, скринкаст работы.
+Запланировано: FastAPI `/predict`, Streamlit или Telegram-бот, скринкаст.
 
-### 8. Заключение и выводы — CP3
+---
 
-Заполняется после CP2 / CP3.
+## 8. Заключение и выводы — CP3
+
+Заполняется после деплоя и финального согласования метрик.

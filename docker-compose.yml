@@ -26,3 +26,17 @@ services:
     command: >
       jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --allow-root
       --NotebookApp.token='' --NotebookApp.password=''
+
+  mlflow:
+    build: .
+    image: news-title-virality:latest
+    container_name: news-title-mlflow
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONPATH=/app
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow ui --backend-store-uri file:///app/mlruns --host 0.0.0.0 --port 5000

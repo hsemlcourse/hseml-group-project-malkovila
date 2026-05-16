@@ -1,0 +1,2 @@
+split_strategy,train_roc_auc,val_roc_auc,test_roc_auc
+time_ordered,0.988166517671569,0.6385129561016472,0.6351432800539155

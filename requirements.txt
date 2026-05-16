@@ -25,10 +25,10 @@ matplotlib==3.8.4
 seaborn==0.13.2
 wordcloud==1.9.3
 
-# Ноутбуки
+# Ноутбуки (без метапакета jupyter — он тянет JupyterLab с очень длинными путями в venv и падает на Windows без Long Path)
 papermill==2.6.0
 ipykernel==6.29.4
-jupyter==1.0.0
+notebook==6.5.7
 jupytext==1.16.3
 
 # Качество кода, используется CI
@@ -44,3 +44,10 @@ python-dotenv==1.0.1
 # Заготовлено под CP2
 xgboost==2.0.3
 lightgbm==4.3.0
+catboost==1.2.7
+optuna==3.6.1
+# 2.14.x тянет pyarrow<16; 2.18+ — pyarrow<19 (совместимо с 16.x)
+mlflow==2.18.0
+textstat==0.7.3
+shap==0.45.1
+umap-learn==0.5.6
