@@ -40,3 +40,33 @@ services:
       - "5000:5000"
     command: >
       mlflow ui --backend-store-uri file:///app/mlruns --host 0.0.0.0 --port 5000
+
+  api:
+    build: .
+    image: news-title-virality:latest
+    container_name: news-title-api
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONPATH=/app
+      - NLTK_DATA=/usr/local/share/nltk_data
+    ports:
+      - "8000:8000"
+    command: >
+      uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+
+  streamlit:
+    build: .
+    image: news-title-virality:latest
+    container_name: news-title-streamlit
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      - PYTHONPATH=/app
+      - NLTK_DATA=/usr/local/share/nltk_data
+    ports:
+      - "8501:8501"
+    command: >
+      streamlit run src/deploy/streamlit_app.py --server.port 8501 --server.address 0.0.0.0

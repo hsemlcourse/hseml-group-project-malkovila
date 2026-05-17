@@ -22,7 +22,7 @@
 - **Задача:** бинарная классификация (`is_popular`: порог — медиана `shares` **только в train**, без утечки из val/test; фиксируется в `data/processed/split_meta.json`).
 - **Датасет:** [UCI Online News Popularity](https://archive.ics.uci.edu/dataset/332/online+news+popularity) (39 644 × 61).
 - **Главная метрика:** ROC-AUC. Сопровождающие: F1 (positive class), PR-AUC, Precision@top-10%.
-- **Чекпоинт:** CP2 — расширенные эксперименты (Optuna + RandomizedSearch), стекинг, MLflow, time-split и дрифт, размерность PCA/UMAP; отчёт см. [`report/report.md`](report/report.md).
+- **Чекпоинт:** CP3 — деплой (FastAPI + Streamlit + Docker + публичный на HF Spaces / Render) и финальный отчёт; см. [`report/report.md`](report/report.md).
 
 ## Структура репозитория
 
@@ -37,22 +37,34 @@
 │   ├── 02_parse_titles.ipynb  # Восстановление текстов заголовков из URL
 │   ├── 03_features.ipynb      # Feature engineering и MI-анализ
 │   └── 04_baseline.ipynb      # Baseline LogReg + 2 эксперимента-задела
-├── presentation/              # Слайды (появятся на защите)
+├── deploy/
+│   ├── bundle.py              # Упаковка артефактов для деплоя
+│   └── hf_space/              # Streamlit app для Hugging Face Spaces
+├── presentation/
+│   └── slides.md              # Marp-слайды для защиты (7 шт)
 ├── report/
 │   ├── images/                # Графики, переиспользуемые в отчёте
 │   ├── tables/                # Таблицы метрик и экспериментов (CSV)
-│   └── report.md              # Финальный отчёт (заполнен до §5)
+│   └── report.md              # Финальный отчёт (§1–§8)
 ├── src/
 │   ├── config.py              # Пути, SEED, лексиконы (кликбейт / сентимент)
+│   ├── api/
+│   │   ├── app.py             # FastAPI: /health, /version, /predict, /predict_batch
+│   │   └── schemas.py         # Pydantic-схемы с Literal-валидацией
 │   ├── data/
 │   │   ├── download.py        # UCI id=332 → data/raw/online_news_popularity.csv
 │   │   └── parse_titles.py    # Slug → HTTP → Wayback, CLI с кэшем
+│   ├── deploy/
+│   │   └── streamlit_app.py   # Streamlit UI (одиночный + сравнение заголовков)
 │   ├── features/
 │   │   ├── title_features.py  # 25 handcrafted-фич по тексту заголовка
 │   │   ├── build_dataset.py   # Очистка → FE → split → порог по train
 │   │   ├── build_dataset_full.py  # + TF-IDF char/word + SVD, readability
 │   │   ├── time_split.py      # сплит по timedelta
 │   │   └── drift_report.py    # KS train vs test
+│   ├── inference/
+│   │   ├── predictor.py       # NewsViralityPredictor (загрузка модели)
+│   │   └── feature_builder.py # FeatureBuilder (сборка вектора 144 фич)
 │   ├── modeling/
 │   │   ├── metrics.py         # ROC-AUC, F1, PR-AUC, Precision@k
 │   │   ├── baseline.py        # LogReg на 5 CSV title-фичах
@@ -130,6 +142,33 @@ docker-compose run --rm app make run-all
 docker-compose up jupyter
 ```
 
+### Пайплайн CP3 (деплой)
+
+```bash
+# FastAPI на :8000
+make api
+
+# Streamlit UI на :8501
+make streamlit
+
+# Docker Compose (оба сервиса)
+docker compose up api streamlit
+
+# Smoke-тесты деплоя
+make run-cp3-smoke
+
+# Собрать PDF отчёт
+make report-pdf
+
+# Собрать PDF слайдов (нужен marp-cli)
+make slides-pdf
+```
+
+**Публичный деплой:**
+- Streamlit UI: [Hugging Face Spaces](https://huggingface.co/spaces/) — `deploy/hf_space/`
+- FastAPI: [Render.com](https://render.com) — `render.yaml`
+- Видео-демо: *[TODO: вставить ссылку после записи]*
+
 ### Ручной парсинг с HTTP + Wayback (опционально)
 
 ```bash
@@ -163,4 +202,4 @@ CP1 — ключевая таблица (validation, после `make run-all`):
 
 ## Отчёт
 
-Финальный отчёт с разделами CP1+CP2: [`report/report.md`](report/report.md).
+Финальный отчёт (§1–§8): [`report/report.md`](report/report.md).

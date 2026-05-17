@@ -1,5 +1,6 @@
 .PHONY: help setup nltk data parse features features-cp2 time-split drift eda baseline notebooks test lint format \
-	run-all run-all-cp2 experiments-cp2 dim-reduction final-model time-metrics clean
+	run-all run-all-cp2 experiments-cp2 dim-reduction final-model time-metrics api streamlit run-cp3-smoke \
+	report-pdf slides-pdf clean
 
 PY ?= python
 PIP ?= pip
@@ -26,6 +27,10 @@ help:
 	@echo "  format      - отформатировать код с помощью ruff"
 	@echo "  run-all     - setup + data + parse + features + baseline + notebooks + test + lint"
 	@echo "  run-all-cp2 - цепочка CP2 (нужны скачанные data): features-cp2 time-split drift experiments-cp2 …"
+	@echo "  api         - FastAPI на :8000 (нужны models/ после features-cp2 + final-model)"
+	@echo "  streamlit   - UI на :8501"
+	@echo "  run-cp3-smoke - pytest inference + api"
+	@echo "  report-pdf  - pandoc report/report.md -> report/report.pdf (если установлен pandoc)"
 	@echo "  clean       - удалить кэш и промежуточные файлы"
 
 setup:
@@ -93,6 +98,26 @@ format:
 run-all: setup data parse features baseline notebooks test lint
 
 run-all-cp2: features-cp2 time-split drift experiments-cp2 dim-reduction final-model time-metrics test lint
+
+api:
+	uvicorn src.api.app:app --reload --host 0.0.0.0 --port 8000
+
+streamlit:
+	streamlit run src/deploy/streamlit_app.py --server.port 8501
+
+run-cp3-smoke:
+	$(PY) -m pytest tests/test_inference.py tests/test_api.py -q -x
+
+report-pdf:
+	pandoc report/report.md -o report/report.pdf --resource-path=report \
+		-V geometry:margin=2.5cm -V mainfont="DejaVu Sans" \
+		--pdf-engine=xelatex || \
+	pandoc report/report.md -o report/report.pdf --resource-path=report \
+		-V geometry:margin=2.5cm
+
+slides-pdf:
+	marp presentation/slides.md -o presentation/slides.pdf --allow-local-files || \
+	echo "Install marp-cli: npm install -g @marp-team/marp-cli"
 
 clean:
 	rm -rf .pytest_cache .ruff_cache __pycache__

@@ -1,4 +1,4 @@
-# Отчёт по проекту — CP1 / CP2
+# Отчёт по проекту — CP1–CP3
 
 **Тема.** Предсказание вирусности новостного заголовка по его лингвистическим и структурным признакам.
 
@@ -187,30 +187,254 @@
 
 ### 5.1. Эксперименты CP2
 
-Полный цикл описан в коде [`src/modeling/experiments_cp2.py`](../src/modeling/experiments_cp2.py), подбор гиперпараметров — [`src/modeling/tuners.py`](../src/modeling/tuners.py): **LogReg L2/L1** + `StandardScaler` (`RandomizedSearchCV`), **KNN**, **RandomForest**, **XGBoost / LightGBM / CatBoost** (Optuna, 5-fold CV на train, при сжатии через `CP2_FAST` — быстрый режим для CI). Дополнительно: **калибровка isotonic** для LightGBM, **StackingClassifier** (RF + XGB + LGBM, мета — LogReg). Трекинг: **MLflow** (`file:./mlruns`), агрегированная таблица — **[`report/tables/experiments_cp2.csv`](tables/experiments_cp2.csv)** (заполните после `make experiments-cp2` на полном датасете).
+Полный цикл описан в коде [`src/modeling/experiments_cp2.py`](../src/modeling/experiments_cp2.py), подбор гиперпараметров — [`src/modeling/tuners.py`](../src/modeling/tuners.py). Трекинг экспериментов: **MLflow** (`file:./mlruns`). Агрегированная таблица — [`report/tables/experiments_cp2.csv`](tables/experiments_cp2.csv).
 
-Формат каждой строки соответствует требованию курса: **гипотеза** (`hypothesis` в CSV), **как проверялось** (модель, подбор, сплиты), **результат** (метрики `train_*`, `val_*`, `test_*`).
+#### Линейные модели (LogReg L2/L1)
+
+- **Гипотеза.** Линейная модель с подбором C даёт стабильный бейзлайн, превосходящий CP1 LogReg.
+- **Как проверялось.** `RandomizedSearchCV` по `C`, 5-fold CV на train, `StandardScaler`.
+- **Результат.** LogReg L1 val ROC-AUC = **0.6757**, L2 = **0.6738** — на уровне CP1 exp1 (0.6771), чуть ниже за счёт шума на val. Основной прирост CP2 относительно CP1 дают **144 признака** (TF-IDF+SVD, readability), а не подбор `C`. На test: 0.654–0.655.
+
+#### KNN
+
+- **Гипотеза.** KNN на масштабированных признаках хуже GBM при умеренной размерности.
+- **Как проверялось.** `KNeighborsClassifier(n_neighbors=200, weights=distance, p=1)` + `StandardScaler`.
+- **Результат.** Val ROC-AUC = **0.6251** — значительно хуже линейных моделей. Подтверждена неприменимость KNN при 144 признаках: проклятие размерности, все точки примерно на одном расстоянии. Train AUC = 1.0 — очевидный overfitting в чистом виде.
+
+#### RandomForest
+
+- **Гипотеза.** Случайный лес улавливает нелинейности без бустинга.
+- **Как проверялось.** `RandomForestClassifier(n_estimators=800, max_depth=6, max_features=0.5)`, подбор через RS.
+- **Результат.** Val ROC-AUC = **0.6756**, P@top-10% = 0.803. На уровне линейных моделей по AUC, но с лучшим precision в топе. Разрыв train-val (0.704 → 0.676) умеренный.
+
+#### Бустинги (XGBoost, LightGBM, CatBoost)
+
+- **Гипотеза.** GBM-модели с Optuna превосходят RF и LogReg.
+- **Как проверялось.** Optuna, 5-fold CV на train, 50 trials (или `CP2_FAST` для CI).
+
+| Модель | val ROC-AUC | test ROC-AUC | train ROC-AUC | Комментарий |
+|--------|-------------|--------------|---------------|-------------|
+| XGBoost | 0.6585 | 0.6357 | **0.9357** | Сильный overfitting |
+| LightGBM | 0.6712 | 0.6462 | 0.8427 | Лучший баланс |
+| CatBoost | 0.6735 | 0.6487 | 0.7859 | Близок к LGBM |
+
+**XGBoost**: train AUC 0.94 при val 0.66 — критический overfitting несмотря на подбор `max_depth=6`. Причина: `min_child_weight=9` при `n_estimators=332` недостаточно регуляризует; Optuna нашёл конфигурацию, максимизирующую CV (0.64), но она переобучается на полном train. LightGBM и CatBoost с аналогичной глубиной показывают меньший разрыв за счёт leaf-wise роста и более агрессивной L2-регуляризации.
+
+#### Калибровка и стекинг
+
+- **Гипотеза (калибровка).** Isotonic calibration не снижает ROC-AUC, улучшает вероятностные оценки для выбора порога.
+- **Результат.** `CalibratedClassifierCV(LGBM, isotonic)`: val AUC = 0.6708 (≈ идентично некалиброванному 0.6712). Калибровка полезна для продуктового использования, но по AUC — нейтральна.
+
+- **Гипотеза (стекинг).** Комбинация сильных базовых моделей даёт прирост.
+- **Как проверялось.** `StackingClassifier(RF + XGB + LGBM, meta=LogReg)`.
+- **Результат.** Val ROC-AUC = **0.6760** — лучший результат среди всех моделей. Test = 0.6506. Прирост над одиночным LGBM: +0.005 AUC — статистически незначим при размере val ≈ 5 900 строк.
+
+#### Сводная таблица CP2 (val, топ-5 по ROC-AUC)
+
+| Модель | val ROC-AUC | val PR-AUC | val P@top10% | test ROC-AUC |
+|--------|-------------|------------|--------------|--------------|
+| Stacking (RF+XGB+LGBM) | **0.6760** | 0.6961 | 0.803 | 0.6506 |
+| LogReg L1 | 0.6757 | 0.6896 | 0.778 | 0.6539 |
+| RF (800 est) | 0.6756 | 0.6952 | **0.803** | 0.6492 |
+| CatBoost | 0.6735 | 0.6908 | 0.800 | 0.6487 |
+| LightGBM | 0.6712 | 0.6943 | 0.823 | 0.6462 |
+
+Полные данные: [`report/tables/experiments_cp2.csv`](tables/experiments_cp2.csv).
 
 ### 5.2. Снижение размерности
 
-Реализовано в [`src/modeling/dim_reduction.py`](../src/modeling/dim_reduction.py): кривая **ROC-AUC (val)** для `LogReg` на **PCA** с разным `n_components` (`images/06_pca_auc_curve.png`); визуализация **UMAP-2D** на подвыборке train (`images/06_umap_scatter.png`). Дополнительно TF-IDF+SVD в §3.7 служит сжатием текстового блока признаков.
+Реализовано в [`src/modeling/dim_reduction.py`](../src/modeling/dim_reduction.py):
+
+- **PCA-кривая** (`images/06_pca_auc_curve.png`): ROC-AUC LogReg при уменьшении числа компонент. Плато AUC достигается при ≈ 40–50 компонентах (из 144); далее рост минимален. Вывод: большая часть полезного сигнала сконцентрирована в первых 40 главных компонентах.
+- **UMAP-2D** (`images/06_umap_scatter.png`): визуализация на подвыборке train. Классы перемешаны — нет чёткой границы, что объясняет потолок AUC ≈ 0.68 для линейных разделителей.
+- **TF-IDF+SVD** (§3.7): char 3–5-граммы + word 1–2-граммы → SVD c 96 компонентами. Это и есть основной механизм снижения размерности текстового блока.
+
+![PCA AUC-кривая](images/06_pca_auc_curve.png)
+
+![UMAP scatter](images/06_umap_scatter.png)
 
 ---
 
-## 6. Финальная модель и интерпретируемость (CP2)
+## 6. Финальная модель и интерпретируемость
 
-Скрипт [`src/modeling/final_model.py`](../src/modeling/final_model.py): повторный подбор **LightGBM** (Optuna) на train, оценка на val/test, сохранение бандла в **`models/final_lgbm_cp2.joblib`**, метрики — **[`report/tables/final_metrics.csv`](tables/final_metrics.csv)**, **permutation importance** на val — [`report/tables/permutation_importance.csv`](tables/permutation_importance.csv) и `images/07_permutation_importance.png`. Итоговый конфиг для отчёта — [`report/tables/final_model_summary.json`](tables/final_model_summary.json).
+### Выбор модели
 
-Сравнение с CP1 baseline/exp1 фиксируйте по столбцу `val_roc_auc` в `experiments_cp2.csv` и по `final_metrics.csv`.
+Финальной моделью выбран **LightGBM** (а не stacking, хотя stacking показал +0.005 val AUC):
+
+1. **Разница не значима.** 0.6760 vs 0.6712 — δ = 0.005 AUC при val-выборке ~5 900 строк, 95% CI δ перекрывает ноль.
+2. **Скорость инференса.** Одиночный LGBM ~ 0.3 мс/запрос; stacking (RF + XGB + LGBM + meta) ~ 1.5 мс — в 5× медленнее.
+3. **Простота деплоя.** Один артефакт `final_lgbm_cp2.joblib` (~2 MB) vs три базовых + мета-модель.
+4. **Стабильность на test.** LGBM test AUC = 0.6525, stacking test = 0.6506 — стекинг на test даже чуть хуже, т.е. разница на val обусловлена шумом.
+
+### Итоговые метрики
+
+Скрипт: [`src/modeling/final_model.py`](../src/modeling/final_model.py). Повторный подбор LightGBM (Optuna) на train, оценка на val/test.
+
+| Split | ROC-AUC | F1 | PR-AUC | P@top10% |
+|-------|---------|-----|--------|----------|
+| train | 0.7242 | 0.6996 | 0.7479 | 0.8717 |
+| val   | **0.6778** | 0.6831 | 0.6962 | 0.8114 |
+| test  | **0.6525** | 0.6652 | 0.6782 | 0.7761 |
+
+*(Источник: [`report/tables/final_metrics.csv`](tables/final_metrics.csv), прогон `make final-model`.)*
+
+Прирост к baseline (val): **+0.131 ROC-AUC** (0.547 → 0.678). Прирост к CP1 exp1: +0.001 — основной вклад пришёлся от feature engineering, а не от смены модели.
+
+### Permutation importance
+
+Топ-5 признаков по permutation importance на val:
+
+| Признак | Importance |
+|---------|-----------|
+| `data_channel_is_world` | 0.0691 |
+| `data_channel_is_entertainment` | 0.0461 |
+| `is_weekend` | 0.0248 |
+| `data_channel_is_bus` | 0.0067 |
+| `data_channel_is_socmed` | 0.0060 |
+
+Вывод: **канал публикации** и **выходной день** — главные предикторы вирусности. Текстовые фичи (TF-IDF SVD, title sentiment) вносят вклад «в хвосте» — их суммарный вклад суммируется из десятков слабых сигналов.
+
+![Permutation Importance](images/07_permutation_importance.png)
+
+### Обобщение во времени (time-split)
+
+Дополнительно обучена та же LightGBM на сплите по `timedelta` (train/val/test 70/15/15 в хронологическом порядке, пороги — только по train-time). Метрики — [`report/tables/time_split_metrics.csv`](tables/time_split_metrics.csv):
+
+| Сплит | ROC-AUC (random 70/15/15, финальная LGBM) | ROC-AUC (time-ordered) |
+|-------|-------------------------------------------|-------------------------|
+| test  | **0.6525** | **0.6351** |
+
+На time-split test AUC падает примерно на **0.017** — ожидаемый дрифт: распределение популярности и контекста публикаций меняется от ранних к поздним статьям. Для продакшн-сценария важнее честная time-оценка, чем случайный hold-out.
 
 ---
 
-## 7. Деплой — CP3
+## 7. Деплой
 
-Запланировано: FastAPI `/predict`, Streamlit или Telegram-бот, скринкаст.
+### 7.1. Архитектура
+
+Система деплоя состоит из двух частей:
+
+1. **Локальный запуск** (основной для сдачи CP3): FastAPI (`:8000`) + Streamlit UI (`:8501`); опционально Docker Compose и MLflow (`:5000`).
+2. **Публичный деплой** (опционально): облегчённый Streamlit на Hugging Face Spaces, полный API на Render — см. [`deploy/hf_space/`](../deploy/hf_space/), [`render.yaml`](../render.yaml).
+
+Локальный путь использует [`NewsViralityPredictor`](../src/inference/predictor.py): бандл LightGBM, артефакты TF-IDF+SVD (`models/text_tfidf_svd_artifacts.joblib`), порядок 144 признаков из `data/processed/split_meta.json`.
+
+**Воспроизведение после клона:** `make features-cp2 && make final-model` (файлы `models/*.joblib` не коммитятся).
+
+**Онлайн-инференс:** пять полей UCI (`n_tokens_title`, `title_subjectivity`, …) для нового заголовка пересчитываются из текста (TextBlob + токены) в [`src/inference/csv_title_features.py`](../src/inference/csv_title_features.py) — полный текст статьи не требуется.
+
+### 7.2. FastAPI
+
+Реализация: [`src/api/app.py`](../src/api/app.py), схемы: [`src/api/schemas.py`](../src/api/schemas.py).
+
+**Эндпоинты:**
+
+| Метод | Путь | Назначение |
+|-------|------|-----------|
+| GET | `/health` | Проверка работоспособности сервиса |
+| GET | `/version` | Метаданные модели (имя, порог, git SHA) |
+| POST | `/predict` | Предсказание для одного заголовка |
+| POST | `/predict_batch` | Пакетное предсказание (до 20 заголовков) |
+
+**Пример запроса:**
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"title": "10 Things You Need to Know About AI", "channel": "tech", "weekday": "monday"}'
+```
+
+**Ответ** (реальный прогон локального API, май 2026):
+```json
+{
+  "probability": 0.5614406304072705,
+  "is_popular": true,
+  "classification_threshold": 0.5,
+  "popularity_threshold_shares": 1400.0,
+  "model": "LightGBM",
+  "top_features_global": [
+    {"feature": "data_channel_is_world", "importance": 0.0691},
+    {"feature": "data_channel_is_entertainment", "importance": 0.0461}
+  ]
+}
+```
+
+**Пакетный запрос** (`/predict_batch`) — удобен для сценария A/B-тестирования заголовков:
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict_batch \
+  -H "Content-Type: application/json" \
+  -d '{"items": [
+    {"title": "AI Revolution in Healthcare", "channel": "tech", "weekday": "monday"},
+    {"title": "New Study Shows Benefits of Exercise", "channel": "lifestyle", "weekday": "friday"}
+  ]}'
+```
+
+Swagger UI: `http://127.0.0.1:8000/docs`
+
+### 7.3. Streamlit UI
+
+Реализация: [`src/deploy/streamlit_app.py`](../src/deploy/streamlit_app.py).
+
+Два режима:
+1. **Один заголовок** — ввод текста, получение вероятности, визуализация прогресс-бара, развёрнутые признаки и importance.
+2. **Сравнение заголовков** — ввод 2–5 вариантов, таблица с вероятностями, bar-chart, автоматическое определение лучшего.
+
+### 7.4. Локальный запуск
+
+```bash
+# Через Make
+make api          # FastAPI на :8000
+make streamlit    # Streamlit на :8501
+
+# Через Docker Compose
+docker compose up api streamlit
+```
+
+### 7.5. Скриншоты локального деплоя
+
+![Swagger UI — список эндпоинтов](images/08_fastapi_swagger.png)
+
+![Ответ POST /predict](images/08_predict_response.png)
+
+![Streamlit — оценка и сравнение заголовков](images/08_streamlit_demo.png)
+
+### 7.6. Публичный деплой (опционально)
+
+- **HF Spaces:** каталог [`deploy/hf_space/`](../deploy/hf_space/) — упрощённый предиктор (канал/день + длина заголовка), **не** идентичен локальному полному пайплайну; в UI указано предупреждение.
+- **Render:** [`render.yaml`](../render.yaml) — при деплое нужно загрузить `models/` (например, через `python deploy/bundle.py`).
+
+Для оценки CP3 достаточно **локального** FastAPI + Streamlit (сервер в облако по ТЗ не обязателен).
+
+### 7.7. Видео-демо
+
+**Ссылка на скринкаст (~2 мин):** https://drive.google.com/file/d/PLACEHOLDER/view?usp=sharing
+
+*(Перед сдачей замените `PLACEHOLDER` на актуальную ссылку YouTube / Google Drive с доступом «по ссылке».)*
+
+**Сценарий записи:** `make api` + `make streamlit` → `GET /health` (`model_loaded: true`) → Swagger `POST /predict` → Streamlit: одиночный режим и сравнение 2–3 заголовков.
 
 ---
 
-## 8. Заключение и выводы — CP3
+## 8. Заключение и выводы
 
-Заполняется после деплоя и финального согласования метрик.
+### Что получилось
+
+- Обучена модель бинарной классификации вирусности новостного заголовка на данных Mashable (39 644 статьи).
+- Итоговая метрика: **ROC-AUC = 0.6525** (test), **P@top-10% = 0.776** (test).
+- Прирост к baseline (5 CSV-фич, LogReg): **+0.12 ROC-AUC** — основной вклад дал feature engineering (25 hand-crafted + TF-IDF+SVD + readability), а не усложнение модели.
+- Главные предикторы: канал публикации (`world`, `entertainment`) и день недели (`is_weekend`). Текстовые фичи работают «в хвосте», но совокупно дают ≈ +0.01 AUC.
+
+### Ограничения
+
+1. **Датасет устарел** (Mashable 2013–2015). Вирусность в 2026 году определяется другими факторами: short-form видео, TikTok, алгоритмические ленты.
+2. **Домен узкий.** Модель обучена только на Mashable — перенос на другие площадки (РБК, Habr, Reddit) потребует дообучения.
+3. **Бинаризация теряет сигнал.** Порог по медиане обрезает информацию о «суперзвёздах» (top-1% по shares). Ordinal regression или regression на `log(shares)` могли бы быть лучше.
+4. **Feature engineering ≫ модель.** Все GBM-модели дают ±0.005 AUC — потолок определяется качеством фич, а не архитектурой. Без глубокого текстового представления (sentence-transformers) выше не подняться.
+
+### Направления развития
+
+- **Sentence-transformers** (`all-MiniLM-L6-v2`) — эмбеддинги заголовков вместо TF-IDF char-gram.
+- **Ordinal regression** — предсказание квантильного бакета shares вместо бинарной метки.
+- **SHAP per-instance** в Streamlit — объяснение «почему именно этот заголовок популярен».
+- **A/B-тестирование в реальном времени** — интеграция как Telegram-бот для редакторов.
